@@ -1,0 +1,562 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <arpa/inet.h>
+#include <time.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <syslog.h>  // Include the syslog header for logging purposes
+#include <ctype.h>
+
+#define PORT 6855
+#define MIRROR1_PORT 4535
+#define MIRROR2_PORT 4363
+
+#define BUFFER_SIZE 4096
+
+
+#define HOME_DIR "/home/patel449"
+#define OUTPUT_DIR "/home/patel449/w24project"
+
+#define MIRROR1_IP "127.0.0.1"
+#define MIRROR2_IP "127.0.0.1"
+
+// Compare function for sorting strings
+int compare_strings(const void *a, const void *b) {
+    const char *str1 = *(const char **)a;
+    const char *str2 = *(const char **)b;
+    return strcmp(str1, str2);
+}
+
+// Compare function for sorting directories by creation time
+int compare_creation_time(const void *a, const void *b) {
+    const char *dir1 = *(const char **)a;
+    const char *dir2 = *(const char **)b;
+
+    struct stat stat1, stat2;
+    stat(dir1, &stat1);
+    stat(dir2, &stat2);
+
+    return stat1.st_atime - stat2.st_atime;
+}
+
+void handle_command(int client_socket, char *command, int client_number) {
+    char buffer[BUFFER_SIZE]; // For communication
+    char filename[BUFFER_SIZE]; // For constructing file paths
+    struct stat stat_buffer; // For checking file information
+    char tar_command[BUFFER_SIZE];
+    
+    if (strcmp(command, "dirlist -a") == 0) {
+        // Print command received
+        printf("\n----------------------------------------------------------------------------");
+        printf("\nCommand received from Client-%d: %s\n", client_number, command);
+
+        // Open the home directory
+        DIR *dir = opendir(HOME_DIR);
+        if (dir) {
+            // Read each entry in the directory
+            struct dirent *entry;
+            char **dir_names = malloc(sizeof(char *) * BUFFER_SIZE);
+            int count = 0;
+            while ((entry = readdir(dir)) != NULL) {
+                if (entry->d_type == DT_DIR && strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+                    // If it's a directory and not "." or "..", add it to the dir_names array
+                    dir_names[count] = strdup(entry->d_name);
+                    count++;
+                }
+            }
+            closedir(dir);
+
+            // Sort the directory names in alphabetical order
+            qsort(dir_names, count, sizeof(char *), compare_strings);
+
+            // Construct the buffer with sorted directory names
+            buffer[0] = '\0'; // Clear buffer
+            for (int i = 0; i < count; i++) {
+                strcat(buffer, dir_names[i]);
+                strcat(buffer, "\n");
+                free(dir_names[i]); // Free memory allocated by strdup
+            }
+            free(dir_names); // Free memory allocated for the array of pointers
+
+            // Send the directory list to the client
+            send(client_socket, buffer, strlen(buffer), 0);
+            printf("Command output sent to Client-%d.\n", client_number);
+        } else {
+            // Failed to open directory, send error message
+            sprintf(buffer, "Error: Unable to open directory: %s", strerror(errno));
+            send(client_socket, buffer, strlen(buffer), 0);
+        }
+        printf("----------------------------------------------------------------------------\n\n");
+    } else if (strcmp(command, "dirlist -t") == 0) {
+        // Print command received
+        printf("\n----------------------------------------------------------------------------");
+        printf("\nCommand received from Client-%d: %s\n", client_number, command);
+
+        // Open the home directory
+        DIR *dir = opendir(HOME_DIR);
+        if (dir) {
+            // Read each entry in the directory
+            struct dirent *entry;
+            char **dir_names = malloc(sizeof(char *) * BUFFER_SIZE);
+            int count = 0;
+            while ((entry = readdir(dir)) != NULL) {
+                if (entry->d_type == DT_DIR && strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+                    // If it's a directory and not "." or "..", add it to the dir_names array
+                    dir_names[count] = strdup(entry->d_name);
+                    count++;
+                }
+            }
+            closedir(dir);
+
+            // Sort the directory names by creation time
+            qsort(dir_names, count, sizeof(char *), compare_creation_time);
+
+            // Construct the buffer with sorted directory names
+            buffer[0] = '\0'; // Clear buffer
+            for (int i = 0; i < count; i++) {
+                strcat(buffer, dir_names[i]);
+                strcat(buffer, "\n");
+                free(dir_names[i]); // Free memory allocated by strdup
+            }
+            free(dir_names); // Free memory allocated for the array of pointers
+
+            // Send the directory list to the client
+            send(client_socket, buffer, strlen(buffer), 0);
+            printf("Command output sent to Client-%d.\n", client_number);
+        } else {
+            // Failed to open directory, send error message
+            sprintf(buffer, "Error: Unable to open directory: %s", strerror(errno));
+            send(client_socket, buffer, strlen(buffer), 0);
+        }
+        printf("----------------------------------------------------------------------------\n\n");
+    } else if (strncmp(command, "w24fn ", 6) == 0) {
+        // Handle the w24fn command
+        printf("\n----------------------------------------------------------------------------");
+        printf("\nCommand received from Client-%d: %s\n", client_number, command);
+    
+        // Extract filename from command
+        char *filename = command + 6;
+    
+        // Search for the file using find command
+        char find_command[BUFFER_SIZE];
+        sprintf(find_command, "find %s -type f -name '%s'", HOME_DIR, filename);
+    
+        FILE *find_output = popen(find_command, "r");
+        if (find_output != NULL) {
+            char file_path[BUFFER_SIZE];
+            // Read the file path from the find command output
+            if (fgets(file_path, sizeof(file_path), find_output) != NULL) {
+                // Trim the newline character
+                file_path[strcspn(file_path, "\n")] = '\0';
+    
+                // Get file information using stat
+                struct stat file_stat;
+                if (stat(file_path, &file_stat) == 0) {
+                    // Prepare response
+                    sprintf(buffer, "File: %s\nSize: %ld bytes\nDate created: %sPermissions: %o\n",
+                            filename, file_stat.st_size, ctime(&file_stat.st_atime), file_stat.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO));
+                    
+                    // Send response to client
+                    send(client_socket, buffer, strlen(buffer), 0);
+                    printf("Command output sent to Client-%d.\n", client_number);
+                } else {
+                    // Failed to get file information, send error message
+                    sprintf(buffer, "Error: Unable to get file information: %s", strerror(errno));
+                    send(client_socket, buffer, strlen(buffer), 0);
+                }
+            } else {
+                // File not found, send error message
+                sprintf(buffer, "File not found");
+                send(client_socket, buffer, strlen(buffer), 0);
+            }
+            pclose(find_output);
+        } else {
+            // Failed to execute find command, send error message
+            sprintf(buffer, "Error: Unable to execute find command");
+            send(client_socket, buffer, strlen(buffer), 0);
+        }
+        printf("----------------------------------------------------------------------------\n\n");
+    } else if (strncmp(command, "w24fz ", 6) == 0) {
+        // Handle the w24fz command
+        printf("\n----------------------------------------------------------------------------");
+        printf("\nCommand received from Client-%d: %s\n", client_number, command);
+
+        // Extract size parameters from command
+        long size1, size2;
+        sscanf(command + 6, "%ld %ld", &size1, &size2);
+
+        // Create a tar file containing files within the specified size range
+        char tar_command[BUFFER_SIZE];
+        snprintf(tar_command, BUFFER_SIZE, "find %s -type f -size +%ldc -size -%ldc -print0 | tar --null -T - -czf - > %s/c%d/temp.tar.gz 2>/dev/null", HOME_DIR, size1, size2, OUTPUT_DIR, client_number);
+        system(tar_command);
+
+        // Check if the tar file is created
+        char filename[BUFFER_SIZE];
+        snprintf(filename, BUFFER_SIZE, "%s/c%d/temp.tar.gz", OUTPUT_DIR, client_number);
+        struct stat stat_buffer;
+        if (stat(filename, &stat_buffer) == 0) {
+            // Send the tar file to the client
+            FILE *tar_file = fopen(filename, "rb");
+            if (tar_file != NULL) {
+                fseek(tar_file, 0, SEEK_END);
+                long tar_size = ftell(tar_file);
+                rewind(tar_file);
+                char *tar_data = malloc(tar_size);
+                fread(tar_data, 1, tar_size, tar_file);
+                fclose(tar_file);
+                send(client_socket, tar_data, tar_size, 0);
+                free(tar_data);
+                printf("temp.tar.gz file sent to Client-%d.\n", client_number);
+            }
+        } else {
+            // No files found within the specified size range
+            send(client_socket, "No file found", strlen("No file found"), 0);
+        }
+        printf("----------------------------------------------------------------------------\n\n");
+    } else if (strncmp(command, "w24ft ", 6) == 0) {
+        // Handle the w24ft command
+        printf("\n----------------------------------------------------------------------------");
+        printf("\nCommand received from Client-%d: %s\n", client_number, command);
+
+        // Extract extension list from command
+        char ext1[10], ext2[10], ext3[10];
+        int num_matched = sscanf(command + 6, "%9s %9s %9s", ext1, ext2, ext3);
+
+        // Construct the find command to search for files with the specified extensions
+        char command_buffer[BUFFER_SIZE];
+        if (num_matched == 1) {
+            sprintf(command_buffer, "find %s -type f -name '*.%s' -exec tar -cf %s/c%d/temp.tar {} + 2>/dev/null", HOME_DIR, ext1, OUTPUT_DIR, client_number);
+        } else if (num_matched == 2) {
+            sprintf(command_buffer, "find %s -type f \\( -name '*.%s' -o -name '*.%s' \\) -exec tar -cf %s/c%d/temp.tar {} + 2>/dev/null", HOME_DIR, ext1, ext2, OUTPUT_DIR, client_number);
+        } else if (num_matched == 3) {
+            sprintf(command_buffer, "find %s -type f \\( -name '*.%s' -o -name '*.%s' -o -name '*.%s' \\) -exec tar -cf %s/c%d/temp.tar {} + 2>/dev/null", HOME_DIR, ext1, ext2, ext3, OUTPUT_DIR, client_number);
+        }
+
+        // Execute the find command
+        //printf("Command buffer: %s\n", command_buffer);
+        int system_result = system(command_buffer);
+        //printf("System result: %d\n", system_result);
+
+        // Check if the temporary tar file is created
+        char temp_tar_path[BUFFER_SIZE];
+        sprintf(temp_tar_path, "%s/c%d/temp.tar", OUTPUT_DIR, client_number);
+        if (access(temp_tar_path, F_OK) == 0) {
+            //printf("Temporary tar file created: %s\n", temp_tar_path);
+            //printf("temp.tar.gz file sent to Client-%d.\n", client_number);
+
+            // Compress the tar file to tar.gz
+            char gzip_command[BUFFER_SIZE];
+            sprintf(gzip_command, "gzip -f %s", temp_tar_path);
+            int gzip_result = system(gzip_command);
+            //printf("Gzip result: %d\n", gzip_result);
+
+            // Send success message to the client
+            printf("temp.tar.gz file sent to Client-%d.\n", client_number);
+        } else {
+            //printf("Temporary tar file does not exist\n");
+            strcpy(buffer, "No file found");
+        }
+
+        // Send response to the client
+        send(client_socket, buffer, strlen(buffer), 0);
+        
+        printf("----------------------------------------------------------------------------\n\n");
+    } else if (strncmp(command, "w24fdb ", 7) == 0) {
+        printf("\n----------------------------------------------------------------------------");
+        printf("\nCommand received from Client-%d: %s\n", client_number, command);
+    
+        // Extract date from command
+        char date_str[20];
+        sscanf(command + 7, "%s", date_str);
+    
+        // Convert date string to time
+        struct tm tm_date = {0};
+        if (strptime(date_str, "%Y-%m-%d", &tm_date) == NULL) {
+            sprintf(buffer, "Error: Date format is incorrect.\n");
+            send(client_socket, buffer, strlen(buffer), 0);
+            return;
+        }
+        tm_date.tm_mday += 1; // Include the entire day
+        mktime(&tm_date); // Normalize tm_date, though not necessary as we won't use it further
+    
+        // Create a tar file containing files created before the target date
+        char find_command[BUFFER_SIZE];
+        snprintf(find_command, BUFFER_SIZE, 
+                 "find %s -type f ! -newerat '%s' -printf '%%p\\n'",
+                 HOME_DIR, date_str);
+    
+        FILE *fp = popen(find_command, "r");
+        if (fp == NULL) {
+            sprintf(buffer, "Error: Failed to execute find command.\n");
+            send(client_socket, buffer, strlen(buffer), 0);
+            return;
+        }
+    
+        //char filepath[BUFFER_SIZE];
+        //while (fgets(filepath, BUFFER_SIZE, fp)) {
+        //    if (filepath[strlen(filepath) - 1] == '\n') {
+        //        filepath[strlen(filepath) - 1] = '\0'; // Strip newline character
+        //    }
+        //    printf("File checked: %s\n", filepath); // Print the file path
+        //}
+        //pclose(fp);
+    
+        // Assuming no errors from find, we proceed to create the tar file
+        snprintf(tar_command, BUFFER_SIZE, 
+                 "find %s -type f ! -newerat '%s' -print0 | tar --null -T - -czf %s/c%d/temp.tar.gz 2>/dev/null",
+                 HOME_DIR, date_str, OUTPUT_DIR, client_number);
+    
+        int tar_status = system(tar_command);
+        if (tar_status != 0) {
+            sprintf(buffer, "Error: Failed to create tar file.\n");
+            send(client_socket, buffer, strlen(buffer), 0);
+            return;
+        }
+    
+        // Check if the tar file is created
+        snprintf(filename, BUFFER_SIZE, "%s/c%d/temp.tar.gz", OUTPUT_DIR, client_number);
+        if (stat(filename, &stat_buffer) == 0) {
+            sprintf(buffer, "Archive created successfully.\n");
+        } else {
+            sprintf(buffer, "Error: Archive file was not created.\n");
+        }
+    
+        send(client_socket, buffer, strlen(buffer), 0);
+        printf("temp.tar.gz sent to Client-%d.\n", client_number);
+        printf("----------------------------------------------------------------------------\n\n");
+    } else if (strncmp(command, "w24fda ", 7) == 0) {
+        printf("\n----------------------------------------------------------------------------");
+        printf("\nCommand received from Client-%d: %s\n", client_number, command);
+    
+        // Extract date from command
+        char date_str[20];
+        sscanf(command + 7, "%s", date_str);
+    
+        // Convert date string to time
+        struct tm tm_date = {0};
+        if (strptime(date_str, "%Y-%m-%d", &tm_date) == NULL) {
+            sprintf(buffer, "Error: Date format is incorrect.\n");
+            send(client_socket, buffer, strlen(buffer), 0);
+            return;
+        }
+        tm_date.tm_mday += 1; // Include the entire day
+        mktime(&tm_date); // Normalize tm_date, though not necessary as we won't use it further
+    
+        // Create a tar file containing files created before the target date
+        char find_command[BUFFER_SIZE];
+        snprintf(find_command, BUFFER_SIZE, 
+                 "find %s -type f -newerat '%s' -printf '%%p\\n'",
+                 HOME_DIR, date_str);
+    
+        FILE *fp = popen(find_command, "r");
+        if (fp == NULL) {
+            sprintf(buffer, "Error: Failed to execute find command.\n");
+            send(client_socket, buffer, strlen(buffer), 0);
+            return;
+        }
+    
+        //char filepath[BUFFER_SIZE];
+        //while (fgets(filepath, BUFFER_SIZE, fp)) {
+        //    if (filepath[strlen(filepath) - 1] == '\n') {
+        //        filepath[strlen(filepath) - 1] = '\0'; // Strip newline character
+        //    }
+        //    printf("File checked: %s\n", filepath); // Print the file path
+        //}
+        //pclose(fp);
+    
+        // Assuming no errors from find, we proceed to create the tar file
+        snprintf(tar_command, BUFFER_SIZE, 
+                 "find %s -type f -newerat '%s' -print0 | tar --null -T - -czf %s/c%d/temp.tar.gz 2>/dev/null",
+                 HOME_DIR, date_str, OUTPUT_DIR, client_number);
+    
+        int tar_status = system(tar_command);
+        if (tar_status != 0) {
+            sprintf(buffer, "Error: Failed to create tar file.\n");
+            send(client_socket, buffer, strlen(buffer), 0);
+            return;
+        }
+    
+        // Check if the tar file is created
+        snprintf(filename, BUFFER_SIZE, "%s/c%d/temp.tar.gz", OUTPUT_DIR, client_number);
+        if (stat(filename, &stat_buffer) == 0) {
+            sprintf(buffer, "Archive created successfully.\n");
+        } else {
+            sprintf(buffer, "Error: Archive file was not created.\n");
+        }
+    
+        send(client_socket, buffer, strlen(buffer), 0);
+        printf("temp.tar.gz sent to Client-%d.\n", client_number);
+        printf("----------------------------------------------------------------------------\n\n");
+    } else {
+        // Unknown command
+        strcpy(buffer, "Unknown command.");
+        send(client_socket, buffer, strlen(buffer), 0);
+    }
+    //printf("Command output sent to Client-%d.\n\n", client_number);
+}
+
+void crequest(int client_socket, int client_number) {
+    char buffer[BUFFER_SIZE];
+    int valread;
+    printf("\n\nClient-%d connected.\n\n", client_number);
+
+    // Send the client number to the client
+    char client_number_msg[BUFFER_SIZE];
+    snprintf(client_number_msg, BUFFER_SIZE, "Client number: %d", client_number);
+    send(client_socket, client_number_msg, strlen(client_number_msg), 0);
+
+
+    while (1) {
+        // Receive command from the client
+        valread = read(client_socket, buffer, BUFFER_SIZE);                         //COMMANDS READ FROM CLIENT 
+        buffer[valread] = '\0';
+
+        
+        // Handle the command
+        handle_command(client_socket, buffer, client_number);
+
+        // Check if the client wants to quit
+        if (strcmp(buffer, "quitc") == 0) {
+            printf("Client-%d disconnected.\n", client_number);
+            break;
+        }
+    }
+    close(client_socket);
+}
+
+void forwardSocket(int sourceSocket, int destinationSocket, int clientSocket) {
+    char buffer[BUFFER_SIZE];
+    ssize_t bytes_read;
+    while ((bytes_read = recv(sourceSocket, buffer, BUFFER_SIZE, 0)) > 0) {
+        send(destinationSocket, buffer, bytes_read, 0);
+        bytes_read = recv(destinationSocket, buffer, BUFFER_SIZE, 0);
+        send(sourceSocket, buffer, bytes_read, 0);
+    }
+}
+
+
+int main() {
+    int serverSocket, clientSocket;
+    struct sockaddr_in serverAddr, clientAddr;
+    socklen_t addr_size;
+
+    int client_number = 0;
+    int serverMode = 0;
+
+    serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverSocket < 0) {
+        perror("[-]Socket error");
+        exit(1);
+    }
+    printf("\nServer is running and waiting for connection.\n");
+
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(PORT);
+    serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    if (bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+        perror("[-]Bind error");
+        exit(1);
+    }
+    
+
+    listen(serverSocket, 5);
+    
+    while (1) {
+        addr_size = sizeof(clientAddr);
+        clientSocket = accept(serverSocket, (struct sockaddr*)&clientAddr, &addr_size);
+
+        client_number++;
+
+        if (client_number <= 3 || client_number > 9 && client_number % 3 == 1) {
+            serverMode = 0; // serverw24
+        } else if (client_number <= 6 || client_number > 9 && client_number % 3 == 2) {
+            serverMode = 1; // mirror1
+            printf("Client-%d forwarded to Mirror-1", client_number);
+        } else if (client_number <= 9 || client_number > 9 && client_number % 3 == 0) {
+            serverMode = 2; // mirror2
+            printf("Client-%d forwarded to Mirror-2", client_number);
+        } else {
+            // Alternate between serverw24, mirror1, and mirror2
+            //int remaining = client_number - 9;
+            //serverMode = (remaining % 3 == 1) ? 0 : ((remaining % 3 == 2) ? 1 : 2);
+            printf("Invlid Client, please restart!");
+        }
+
+        if (serverMode == 1) {
+            // Redirect to mirror1
+            struct sockaddr_in mirror1Addr;
+            memset(&mirror1Addr, 0, sizeof(mirror1Addr));
+            mirror1Addr.sin_family = AF_INET;
+            mirror1Addr.sin_port = htons(MIRROR1_PORT); // Set mirror1 port
+            mirror1Addr.sin_addr.s_addr = inet_addr(MIRROR1_IP); // Set mirror1 IP address
+
+            int mirror1Socket = socket(AF_INET, SOCK_STREAM, 0);        //create mirror socket 
+            if (mirror1Socket < 0) {
+                perror("[-]Mirror1 socket error");
+                exit(1);
+            }
+
+            if (connect(mirror1Socket, (struct sockaddr*)&mirror1Addr, sizeof(mirror1Addr)) < 0) {
+                perror("[-]Mirror1 connection error");
+                exit(1);
+            }
+            // Send client number to mirror1
+            char clientNumBuffer[32];
+            snprintf(clientNumBuffer, sizeof(clientNumBuffer), "Client number: %d", client_number);
+            send(mirror1Socket, clientNumBuffer, strlen(clientNumBuffer), 0);
+            
+            char client_number_msg[BUFFER_SIZE];
+            sprintf(client_number_msg, "Client number: %d", client_number);
+            send(clientSocket, client_number_msg, strlen(client_number_msg), 0);
+            
+            // Forward clientSocket to mirror1Socket
+            forwardSoc000ket(clientSocket, mirror1Socket, clientSocket);
+        } else if (serverMode == 2) {
+            // Redirect to mirror2
+            struct sockaddr_in mirror2Addr;
+            memset(&mirror2Addr, 0, sizeof(mirror2Addr));
+            mirror2Addr.sin_family = AF_INET;
+            mirror2Addr.sin_port = htons(MIRROR2_PORT); // Set mirror2 port
+            mirror2Addr.sin_addr.s_addr = inet_addr(MIRROR2_IP); // Set mirror2 IP address
+
+            int mirror2Socket = socket(AF_INET, SOCK_STREAM, 0);
+            if (mirror2Socket < 0) {
+                perror("[-]Mirror2 socket error");
+                exit(1);
+            }
+
+            if (connect(mirror2Socket, (struct sockaddr*)&mirror2Addr, sizeof(mirror2Addr)) < 0) {
+                perror("[-]Mirror2 connection error");
+                exit(1);
+            }
+            // Send client number to mirror1
+            char clientNumBuffer[32];
+            snprintf(clientNumBuffer, sizeof(clientNumBuffer), "Client number: %d", client_number);
+            send(mirror2Socket, clientNumBuffer, strlen(clientNumBuffer), 0);
+            
+            char client_number_msg[BUFFER_SIZE];
+            sprintf(client_number_msg, "Client number: %d", client_number);
+            send(clientSocket, client_number_msg, strlen(client_number_msg), 0);
+
+            // Forward clientSocket to mirror2Socket
+            forwardSocket(clientSocket, mirror2Socket, clientSocket);
+        } else {
+            // Handle serverw24 connections locally
+            if (fork() == 0) {
+                close(serverSocket);
+                crequest(clientSocket, client_number);
+                exit(0);
+            }
+            close(clientSocket);
+        }
+    }
+
+    return 0;
+}
